@@ -4,6 +4,7 @@ import type { OpenClawConfig } from "../config/config.js";
 const hoisted = vi.hoisted(() => ({
   describeImageFile: vi.fn(),
   runMediaUnderstandingFile: vi.fn(),
+  transcribeAudioFile: vi.fn(),
 }));
 
 vi.mock("../../extensions/media-understanding-core/runtime-api.js", () => ({
@@ -11,20 +12,23 @@ vi.mock("../../extensions/media-understanding-core/runtime-api.js", () => ({
   describeImageFileWithModel: vi.fn(),
   describeVideoFile: vi.fn(),
   runMediaUnderstandingFile: hoisted.runMediaUnderstandingFile,
-  transcribeAudioFile: vi.fn(),
+  transcribeAudioFile: hoisted.transcribeAudioFile,
 }));
 
 let describeImageFile: typeof import("./runtime.js").describeImageFile;
 let runMediaUnderstandingFile: typeof import("./runtime.js").runMediaUnderstandingFile;
+let transcribeAudioFile: typeof import("./runtime.js").transcribeAudioFile;
 
 describe("media-understanding runtime facade", () => {
   beforeAll(async () => {
-    ({ describeImageFile, runMediaUnderstandingFile } = await import("./runtime.js"));
+    ({ describeImageFile, runMediaUnderstandingFile, transcribeAudioFile } =
+      await import("./runtime.js"));
   });
 
   afterEach(() => {
     hoisted.describeImageFile.mockReset();
     hoisted.runMediaUnderstandingFile.mockReset();
+    hoisted.transcribeAudioFile.mockReset();
   });
 
   it("delegates describeImageFile to the shared media-understanding runtime", async () => {
@@ -86,5 +90,18 @@ describe("media-understanding runtime facade", () => {
 
     await expect(runMediaUnderstandingFile(params)).resolves.toEqual(result);
     expect(hoisted.runMediaUnderstandingFile).toHaveBeenCalledWith(params);
+  });
+
+  it("delegates transcribeAudioFile with per-call prompt and language hints", async () => {
+    const params = {
+      filePath: "/tmp/sample.m4a",
+      cfg: {} as OpenClawConfig,
+      language: "en",
+      prompt: "Focus on names",
+    };
+    hoisted.transcribeAudioFile.mockResolvedValue({ text: "hello" });
+
+    await expect(transcribeAudioFile(params)).resolves.toEqual({ text: "hello" });
+    expect(hoisted.transcribeAudioFile).toHaveBeenCalledWith(params);
   });
 });

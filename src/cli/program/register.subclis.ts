@@ -101,6 +101,15 @@ const entries: SubCliEntry[] = [
     },
   },
   {
+    name: "capability",
+    description: "Run provider-backed capability commands",
+    hasSubcommands: true,
+    register: async (program) => {
+      const mod = await import("../capability-cli.js");
+      mod.registerCapabilityCli(program);
+    },
+  },
+  {
     name: "approvals",
     description: "Manage exec approvals (gateway or node host)",
     hasSubcommands: true,
