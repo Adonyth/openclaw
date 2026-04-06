@@ -17,6 +17,7 @@ import type { PromptImageOrderEntry } from "../../media/prompt-image-order.js";
 import { type SavedMedia, saveMediaBuffer } from "../../media/store.js";
 import { createChannelReplyPipeline } from "../../plugin-sdk/channel-reply-pipeline.js";
 import { getRealtimeTranscriptionProvider } from "../../plugin-sdk/realtime-transcription.js";
+import type { RealtimeTranscriptionSession } from "../../realtime-transcription/provider-types.js";
 import { normalizeInputProvenance, type InputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
@@ -999,6 +1000,41 @@ function createChatAbortOps(context: GatewayRequestContext): ChatAbortOps {
 function normalizeOptionalText(value?: string | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed || undefined;
+}
+
+function getActiveChatVoiceCallbackSession(params: {
+  sessionKey: string;
+  connId: string;
+  sttSession: RealtimeTranscriptionSession;
+}) {
+  const active = getChatVoiceSession(params.sessionKey);
+  if (!active || active.connId !== params.connId || active.sttSession !== params.sttSession) {
+    return undefined;
+  }
+  return active;
+}
+
+function isStrictBase64(value: string): boolean {
+  const normalized = value.replace(/\s+/g, "");
+  if (!normalized || normalized.length % 4 !== 0) {
+    return false;
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+    return false;
+  }
+  const decoded = Buffer.from(normalized, "base64");
+  return decoded.length > 0 && decoded.toString("base64") === normalized;
+}
+
+function parseStrictBase64AudioBuffer(value: unknown): Buffer {
+  const audio = typeof value === "string" ? value.trim() : "";
+  if (!audio) {
+    throw new Error("audio is required.");
+  }
+  if (!isStrictBase64(audio)) {
+    throw new Error("audio must be base64 encoded.");
+  }
+  return Buffer.from(audio, "base64");
 }
 
 function resolveControlUiVoiceConfig(cfg: ReturnType<typeof loadSessionEntry>["cfg"]) {
@@ -2059,11 +2095,12 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     const playbackEnabled = voiceConfig.playbackEnabled !== false;
     try {
-      const sttSession = provider.createSession({
+      let sttSession: RealtimeTranscriptionSession;
+      sttSession = provider.createSession({
         providerConfig,
         onSpeechStart: () => {
-          const active = getChatVoiceSession(sessionKey);
-          if (!active || active.connId !== connId) {
+          const active = getActiveChatVoiceCallbackSession({ sessionKey, connId, sttSession });
+          if (!active) {
             return;
           }
           active.transcriptPartial = "";
@@ -2074,8 +2111,8 @@ export const chatHandlers: GatewayRequestHandlers = {
           });
         },
         onPartial: (partial) => {
-          const active = getChatVoiceSession(sessionKey);
-          if (!active || active.connId !== connId) {
+          const active = getActiveChatVoiceCallbackSession({ sessionKey, connId, sttSession });
+          if (!active) {
             return;
           }
           active.transcriptPartial = partial;
@@ -2087,8 +2124,8 @@ export const chatHandlers: GatewayRequestHandlers = {
           });
         },
         onTranscript: (transcript) => {
-          const active = getChatVoiceSession(sessionKey);
-          if (!active || active.connId !== connId) {
+          const active = getActiveChatVoiceCallbackSession({ sessionKey, connId, sttSession });
+          if (!active) {
             return;
           }
           active.transcriptFinal = transcript;
@@ -2101,6 +2138,10 @@ export const chatHandlers: GatewayRequestHandlers = {
           });
         },
         onError: (error) => {
+          const active = getActiveChatVoiceCallbackSession({ sessionKey, connId, sttSession });
+          if (!active) {
+            return;
+          }
           void closeChatVoiceSession({
             context,
             sessionKey,
@@ -2175,8 +2216,15 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    let audioBuffer: Buffer;
     try {
-      entry.sttSession.sendAudio(Buffer.from(audio, "base64"));
+      audioBuffer = parseStrictBase64AudioBuffer(audio);
+    } catch (err) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, String(err)));
+      return;
+    }
+    try {
+      entry.sttSession.sendAudio(audioBuffer);
       respond(true, { ok: true });
     } catch (err) {
       respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)));
@@ -2227,9 +2275,6 @@ export const chatHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    entry.transcriptFinal = "";
-    entry.transcriptPartial = "";
-
     const runId = randomUUID();
     const voiceSendResult = await new Promise<{
       ok: boolean;
@@ -2254,6 +2299,8 @@ export const chatHandlers: GatewayRequestHandlers = {
       respond(false, voiceSendResult.payload, voiceSendResult.error);
       return;
     }
+    entry.transcriptFinal = "";
+    entry.transcriptPartial = "";
     setChatVoiceRunId(sessionKey, runId);
     emitChatVoiceEvent(context, connId, {
       sessionKey,
