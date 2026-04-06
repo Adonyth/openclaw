@@ -15,11 +15,6 @@ const DISCORD_GATEWAY_READY_POLL_MS = 250;
 const DISCORD_GATEWAY_STARTUP_DISCONNECT_DRAIN_TIMEOUT_MS = 5_000;
 const DISCORD_GATEWAY_STARTUP_TERMINATE_CLOSE_TIMEOUT_MS = 1_000;
 
-type ExecApprovalsHandler = {
-  start: () => Promise<void>;
-  stop: () => Promise<void>;
-};
-
 type GatewayReadyWaitResult = "ready" | "stopped" | "timeout";
 
 async function restartGatewayAfterReadyTimeout(params: {
@@ -358,7 +353,6 @@ export async function runDiscordGatewayLifecycle(params: {
   isDisallowedIntentsError: (err: unknown) => boolean;
   voiceManager: DiscordVoiceManager | null;
   voiceManagerRef: { current: DiscordVoiceManager | null };
-  execApprovalsHandler: ExecApprovalsHandler | null;
   threadBindings: { stop: () => void };
   gatewaySupervisor: DiscordGatewaySupervisor;
   statusSink?: DiscordMonitorStatusSink;
@@ -416,10 +410,6 @@ export async function runDiscordGatewayLifecycle(params: {
       throw event.err;
     });
   try {
-    if (params.execApprovalsHandler) {
-      await params.execApprovalsHandler.start();
-    }
-
     // Drain gateway errors emitted before lifecycle listeners were attached.
     if (drainPendingGatewayErrors() === "stop") {
       return;
@@ -463,9 +453,6 @@ export async function runDiscordGatewayLifecycle(params: {
     if (params.voiceManager) {
       await params.voiceManager.destroy();
       params.voiceManagerRef.current = null;
-    }
-    if (params.execApprovalsHandler) {
-      await params.execApprovalsHandler.stop();
     }
     params.threadBindings.stop();
   }
