@@ -755,6 +755,13 @@ export function renderApp(state: AppViewState) {
               onSettingsChange: (next) => state.applySettings(next),
               onPasswordChange: (next) => (state.password = next),
               onSessionKeyChange: (next) => {
+                if (state.client && state.connected && state.chatVoiceActive) {
+                  void state.client
+                    .request("chat.voice.stop", { sessionKey: state.sessionKey })
+                    .catch(() => {
+                      // ignore best-effort voice cleanup errors during navigation
+                    });
+                }
                 state.sessionKey = next;
                 state.chatMessage = "";
                 state.resetToolStream();
@@ -1535,12 +1542,24 @@ export function renderApp(state: AppViewState) {
           ? renderChat({
               sessionKey: state.sessionKey,
               onSessionKeyChange: (next) => {
+                if (state.client && state.connected && state.chatVoiceActive) {
+                  void state.client
+                    .request("chat.voice.stop", { sessionKey: state.sessionKey })
+                    .catch(() => {
+                      // ignore best-effort voice cleanup errors during navigation
+                    });
+                }
                 state.sessionKey = next;
                 state.chatMessage = "";
                 state.chatAttachments = [];
                 state.chatStream = null;
                 state.chatStreamStartedAt = null;
                 state.chatRunId = null;
+                state.chatVoiceActive = false;
+                state.chatVoiceState = "idle";
+                state.chatVoiceTranscript = "";
+                state.chatVoiceRunId = null;
+                state.chatVoiceError = null;
                 state.chatQueue = [];
                 state.resetToolStream();
                 state.resetChatScroll();
@@ -1572,6 +1591,11 @@ export function renderApp(state: AppViewState) {
               canSend: state.connected,
               disabledReason: chatDisabledReason,
               error: state.lastError,
+              voiceActive: state.chatVoiceActive,
+              voiceState: state.chatVoiceState,
+              voiceTranscript: state.chatVoiceTranscript,
+              voiceError: state.chatVoiceError,
+              voicePlaybackEnabled: state.chatVoicePlaybackEnabled,
               sessions: state.sessionsResult,
               focusMode: chatFocus,
               onRefresh: () => {
@@ -1594,6 +1618,69 @@ export function renderApp(state: AppViewState) {
               attachments: state.chatAttachments,
               onAttachmentsChange: (next) => (state.chatAttachments = next),
               onSend: () => state.handleSendChat(),
+              onVoiceStart: async () => {
+                if (!state.client || !state.connected) {
+                  return false;
+                }
+                state.chatVoiceActive = false;
+                state.chatVoiceState = "connecting";
+                state.chatVoiceTranscript = "";
+                state.chatVoiceRunId = null;
+                state.chatVoiceError = null;
+                try {
+                  const res = (await state.client.request("chat.voice.start", {
+                    sessionKey: state.sessionKey,
+                  })) as { playbackEnabled?: boolean } | undefined;
+                  state.chatVoiceActive = true;
+                  state.chatVoiceState = "listening";
+                  state.chatVoicePlaybackEnabled = res?.playbackEnabled !== false;
+                  return true;
+                } catch (error) {
+                  state.chatVoiceActive = false;
+                  state.chatVoiceState = "error";
+                  state.chatVoiceError = String(error);
+                  return false;
+                }
+              },
+              onVoiceAudioChunk: async (chunkBase64) => {
+                if (!state.client || !state.connected || !state.chatVoiceActive) {
+                  return;
+                }
+                try {
+                  await state.client.request("chat.voice.audio", {
+                    sessionKey: state.sessionKey,
+                    audio: chunkBase64,
+                    format: "pcm16",
+                    sampleRate: 16000,
+                  });
+                } catch (error) {
+                  state.chatVoiceState = "error";
+                  state.chatVoiceError = String(error);
+                }
+              },
+              onVoiceStop: async () => {
+                state.chatVoiceActive = false;
+                state.chatVoiceRunId = null;
+                state.chatVoiceTranscript = "";
+                if (!state.client || !state.connected) {
+                  state.chatVoiceState = "idle";
+                  return;
+                }
+                try {
+                  await state.client.request("chat.voice.stop", { sessionKey: state.sessionKey });
+                } catch (error) {
+                  state.chatVoiceState = "error";
+                  state.chatVoiceError = String(error);
+                }
+              },
+              onVoiceInterrupt: async () => {
+                if (!state.client || !state.connected) {
+                  return;
+                }
+                await state.client.request("chat.voice.interrupt", {
+                  sessionKey: state.sessionKey,
+                });
+              },
               canAbort: Boolean(state.chatRunId),
               onAbort: () => void state.handleAbortChat(),
               onQueueRemove: (id) => state.removeQueuedMessage(id),

@@ -116,6 +116,11 @@ const BASE_METHODS = [
   "chat.history",
   "chat.abort",
   "chat.send",
+  "chat.voice.start",
+  "chat.voice.audio",
+  "chat.voice.commit",
+  "chat.voice.interrupt",
+  "chat.voice.stop",
 ];
 
 export function listGatewayMethods(): string[] {
@@ -127,6 +132,7 @@ export const GATEWAY_EVENTS = [
   "connect.challenge",
   "agent",
   "chat",
+  "chat.voice.event",
   "session.message",
   "session.tool",
   "sessions.changed",

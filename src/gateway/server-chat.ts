@@ -5,6 +5,7 @@ import { loadConfig } from "../config/config.js";
 import { type AgentEventPayload, getAgentRunContext } from "../infra/agent-events.js";
 import { resolveHeartbeatVisibility } from "../infra/heartbeat-visibility.js";
 import { stripInlineDirectiveTagsForDisplay } from "../utils/directive-tags.js";
+import { getChatVoiceSessionByRunId, setChatVoiceRunId } from "./chat-voice-sessions.js";
 import { loadGatewaySessionRow } from "./server-chat.load-gateway-session-row.runtime.js";
 import { persistGatewaySessionLifecycleEvent } from "./server-chat.persist-session-lifecycle.runtime.js";
 import { deriveGatewaySessionLifecycleSnapshot } from "./session-lifecycle-state.js";
@@ -844,6 +845,20 @@ export function createAgentEventHandler({
             evtStopReason,
           );
         }
+        const voiceSession = getChatVoiceSessionByRunId(clientRunId);
+        if (voiceSession) {
+          setChatVoiceRunId(voiceSession.sessionKey, null);
+          broadcastToConnIds(
+            "chat.voice.event",
+            {
+              sessionKey: voiceSession.sessionKey,
+              state: "assistant_completed",
+              runId: clientRunId,
+              playbackEnabled: voiceSession.playbackEnabled,
+            },
+            new Set([voiceSession.connId]),
+          );
+        }
       } else if (isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
         chatRunState.abortedRuns.delete(clientRunId);
         chatRunState.abortedRuns.delete(evt.runId);
@@ -851,6 +866,21 @@ export function createAgentEventHandler({
         chatRunState.deltaSentAt.delete(clientRunId);
         if (chatLink) {
           chatRunState.registry.remove(evt.runId, clientRunId, sessionKey);
+        }
+        const voiceSession = getChatVoiceSessionByRunId(clientRunId);
+        if (voiceSession) {
+          setChatVoiceRunId(voiceSession.sessionKey, null);
+          broadcastToConnIds(
+            "chat.voice.event",
+            {
+              sessionKey: voiceSession.sessionKey,
+              state: "interrupted",
+              runId: clientRunId,
+              playbackEnabled: voiceSession.playbackEnabled,
+            },
+            new Set([voiceSession.connId]),
+            { dropIfSlow: true },
+          );
         }
       }
     }

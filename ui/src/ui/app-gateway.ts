@@ -17,6 +17,8 @@ import {
 import { handleAgentEvent, resetToolStream, type AgentEventPayload } from "./app-tool-stream.ts";
 import type { OpenClawApp } from "./app.ts";
 import { shouldReloadHistoryForFinalEvent } from "./chat-event-reload.ts";
+import { extractText } from "./chat/message-extract.ts";
+import { speakText, stopTts } from "./chat/speech.ts";
 import { formatConnectError } from "./connect-error.ts";
 import { loadAgents } from "./controllers/agents.ts";
 import { loadAssistantIdentity } from "./controllers/assistant-identity.ts";
@@ -84,6 +86,20 @@ type GatewayHost = {
   serverVersion: string | null;
   sessionKey: string;
   chatRunId: string | null;
+  chatVoiceActive: boolean;
+  chatVoiceState:
+    | "idle"
+    | "connecting"
+    | "listening"
+    | "processing"
+    | "speaking"
+    | "interrupted"
+    | "error";
+  chatVoiceTranscript: string;
+  chatVoiceRunId: string | null;
+  chatVoicePlaybackEnabled: boolean;
+  chatVoiceError: string | null;
+  chatMessages: unknown[];
   refreshSessionsAfterChat: Set<string>;
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalError: string | null;
@@ -194,17 +210,15 @@ export function connectGateway(host: GatewayHost, options?: ConnectGatewayOption
   host.lastErrorCode = null;
   host.hello = null;
   host.connected = false;
+  host.execApprovalQueue = pruneExecApprovalQueue(host.execApprovalQueue);
   if (reconnectReason === "seq-gap") {
     // A seq gap means the socket stayed on the same gateway; preserve prompts
     // that only arrived as ephemeral events and clear stale run-scoped indicators.
-    host.execApprovalQueue = pruneExecApprovalQueue(host.execApprovalQueue);
     clearPendingQueueItemsForRun(
       host as unknown as Parameters<typeof clearPendingQueueItemsForRun>[0],
       host.chatRunId ?? undefined,
     );
     shutdownHost.resumeChatQueueAfterReconnect = true;
-  } else {
-    host.execApprovalQueue = [];
   }
   host.execApprovalError = null;
 
@@ -258,6 +272,11 @@ export function connectGateway(host: GatewayHost, options?: ConnectGatewayOption
         return;
       }
       host.connected = false;
+      host.chatVoiceActive = false;
+      host.chatVoiceRunId = null;
+      host.chatVoiceTranscript = "";
+      host.chatVoiceState = "idle";
+      stopTts();
       // Code 1012 = Service Restart (expected during config saves, don't show as error)
       host.lastErrorCode =
         resolveGatewayErrorDetailCode(error) ??
@@ -352,9 +371,134 @@ function handleChatGatewayEvent(host: GatewayHost, payload: ChatEventPayload | u
     );
   }
   const state = handleChatEvent(host as unknown as OpenClawApp, payload);
+  if (
+    state === "final" &&
+    payload?.runId &&
+    host.chatVoiceActive &&
+    payload.runId === host.chatVoiceRunId &&
+    host.chatVoicePlaybackEnabled
+  ) {
+    const spokenText =
+      extractText(payload.message) ||
+      extractText(host.chatMessages[host.chatMessages.length - 1] ?? undefined) ||
+      "";
+    if (spokenText.trim()) {
+      host.chatVoiceState = "speaking";
+      host.chatVoiceError = null;
+      speakText(spokenText, {
+        onEnd: () => {
+          if (host.chatVoiceActive) {
+            host.chatVoiceState = "listening";
+          }
+        },
+        onError: (error) => {
+          host.chatVoiceState = "error";
+          host.chatVoiceError = error;
+        },
+      });
+    } else if (host.chatVoiceActive) {
+      host.chatVoiceState = "listening";
+    }
+  }
   const historyReloaded = handleTerminalChatEvent(host, payload, state);
   if (state === "final" && !historyReloaded && shouldReloadHistoryForFinalEvent(payload)) {
     void loadChatHistory(host as unknown as OpenClawApp);
+  }
+}
+
+function handleChatVoiceGatewayEvent(
+  host: GatewayHost,
+  payload:
+    | {
+        sessionKey?: string;
+        state?: string;
+        transcript?: string;
+        runId?: string;
+        errorMessage?: string;
+        playbackEnabled?: boolean;
+      }
+    | undefined,
+) {
+  if (!payload?.sessionKey || payload.sessionKey !== host.sessionKey) {
+    return;
+  }
+  const playbackEnabled = payload.playbackEnabled !== false;
+  host.chatVoicePlaybackEnabled = playbackEnabled;
+  switch (payload.state) {
+    case "ready":
+      host.chatVoiceActive = true;
+      host.chatVoiceState = "listening";
+      host.chatVoiceError = null;
+      return;
+    case "speech_start":
+      host.chatVoiceState = "listening";
+      host.chatVoiceTranscript = "";
+      stopTts();
+      if (host.chatVoiceRunId && host.client) {
+        void host.client
+          .request("chat.voice.interrupt", { sessionKey: host.sessionKey })
+          .catch(() => {
+            // ignore best-effort interruption errors
+          });
+      }
+      return;
+    case "partial_transcript":
+      host.chatVoiceState = "listening";
+      host.chatVoiceTranscript = payload.transcript ?? "";
+      return;
+    case "final_transcript":
+      host.chatVoiceState = "processing";
+      host.chatVoiceTranscript = payload.transcript ?? "";
+      if (host.client) {
+        void host.client
+          .request("chat.voice.commit", {
+            sessionKey: host.sessionKey,
+            transcript: payload.transcript ?? "",
+          })
+          .catch((error) => {
+            host.chatVoiceState = "error";
+            host.chatVoiceError = formatConnectError(error);
+          });
+      }
+      return;
+    case "assistant_started":
+      host.chatVoiceState = "processing";
+      host.chatVoiceRunId = payload.runId ?? host.chatVoiceRunId;
+      return;
+    case "assistant_completed":
+      host.chatVoiceRunId = null;
+      if (host.chatVoiceState !== "speaking" && host.chatVoiceActive) {
+        host.chatVoiceState = "listening";
+      }
+      return;
+    case "playback_clear":
+      stopTts();
+      if (host.chatVoiceActive) {
+        host.chatVoiceState = "listening";
+      }
+      return;
+    case "interrupted":
+      host.chatVoiceRunId = null;
+      host.chatVoiceState = host.chatVoiceActive ? "interrupted" : "idle";
+      stopTts();
+      return;
+    case "error":
+      host.chatVoiceActive = false;
+      host.chatVoiceRunId = null;
+      host.chatVoiceState = "error";
+      host.chatVoiceError = payload.errorMessage ?? "Voice error";
+      stopTts();
+      return;
+    case "closed":
+      host.chatVoiceActive = false;
+      host.chatVoiceRunId = null;
+      host.chatVoiceState = "idle";
+      host.chatVoiceTranscript = "";
+      host.chatVoiceError = null;
+      stopTts();
+      return;
+    default:
+      return;
   }
 }
 
@@ -380,6 +524,23 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
 
   if (evt.event === "chat") {
     handleChatGatewayEvent(host, evt.payload as ChatEventPayload | undefined);
+    return;
+  }
+
+  if (evt.event === "chat.voice.event") {
+    handleChatVoiceGatewayEvent(
+      host,
+      evt.payload as
+        | {
+            sessionKey?: string;
+            state?: string;
+            transcript?: string;
+            runId?: string;
+            errorMessage?: string;
+            playbackEnabled?: boolean;
+          }
+        | undefined,
+    );
     return;
   }
 

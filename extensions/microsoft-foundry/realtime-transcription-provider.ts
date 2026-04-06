@@ -4,23 +4,27 @@ import type {
   RealtimeTranscriptionSession,
   RealtimeTranscriptionSessionCreateRequest,
 } from "openclaw/plugin-sdk/realtime-transcription";
-import { normalizeResolvedSecretInputString } from "openclaw/plugin-sdk/secret-input";
 import WebSocket from "ws";
+import { normalizeFoundryEndpoint, PROVIDER_ID } from "./shared.js";
 
-type OpenAIRealtimeTranscriptionProviderConfig = {
+type FoundryRealtimeTranscriptionProviderConfig = {
   apiKey?: string;
+  baseUrl?: string;
+  endpoint?: string;
+  deployment?: string;
   model?: string;
+  apiVersion?: string;
   silenceDurationMs?: number;
   vadThreshold?: number;
-  inputAudioFormat?: string;
 };
 
-type OpenAIRealtimeTranscriptionSessionConfig = RealtimeTranscriptionSessionCreateRequest & {
+type FoundryRealtimeTranscriptionSessionConfig = RealtimeTranscriptionSessionCreateRequest & {
   apiKey: string;
-  model: string;
+  baseUrl: string;
+  deployment: string;
+  apiVersion: string;
   silenceDurationMs: number;
   vadThreshold: number;
-  inputAudioFormat: string;
 };
 
 type RealtimeEvent = {
@@ -28,6 +32,7 @@ type RealtimeEvent = {
   delta?: string;
   transcript?: string;
   error?: unknown;
+  item?: { transcript?: string } | null;
 };
 
 function trimToUndefined(value: unknown): string | undefined {
@@ -44,35 +49,48 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function normalizeProviderConfig(
-  config: RealtimeTranscriptionProviderConfig,
-): OpenAIRealtimeTranscriptionProviderConfig {
-  const providers = asObject(config.providers);
-  const raw = asObject(providers?.openai) ?? asObject(config.openai) ?? asObject(config);
+function extractFoundryProviderConfig(
+  rawConfig: RealtimeTranscriptionProviderConfig,
+): FoundryRealtimeTranscriptionProviderConfig {
+  const providers = asObject(rawConfig.providers);
+  const raw =
+    asObject(providers?.[PROVIDER_ID]) ??
+    asObject(rawConfig[PROVIDER_ID]) ??
+    asObject(rawConfig.microsoftFoundry) ??
+    asObject(rawConfig);
+  const providerBaseUrl = trimToUndefined(raw?.baseUrl);
+  const endpoint = trimToUndefined(raw?.endpoint);
   return {
     apiKey:
-      normalizeResolvedSecretInputString({
-        value: raw?.apiKey,
-        path: "plugins.entries.voice-call.config.streaming.providers.openai.apiKey",
-      }) ??
-      normalizeResolvedSecretInputString({
-        value: raw?.openaiApiKey,
-        path: "plugins.entries.voice-call.config.streaming.openaiApiKey",
-      }),
-    model: trimToUndefined(raw?.model) ?? trimToUndefined(raw?.sttModel),
+      trimToUndefined(raw?.apiKey) ??
+      trimToUndefined(asObject(raw?.headers)?.["api-key"]) ??
+      trimToUndefined(asObject(raw?.headers)?.Authorization)?.replace(/^Bearer\s+/i, ""),
+    baseUrl: providerBaseUrl,
+    endpoint,
+    deployment:
+      trimToUndefined(raw?.deployment) ??
+      trimToUndefined(raw?.model) ??
+      trimToUndefined(raw?.deploymentName),
+    model: trimToUndefined(raw?.transcriptionModel) ?? trimToUndefined(raw?.model),
+    apiVersion: trimToUndefined(raw?.apiVersion),
     silenceDurationMs: asNumber(raw?.silenceDurationMs),
     vadThreshold: asNumber(raw?.vadThreshold),
-    inputAudioFormat: trimToUndefined(raw?.inputAudioFormat),
   };
 }
 
-function readProviderConfig(
-  providerConfig: RealtimeTranscriptionProviderConfig,
-): OpenAIRealtimeTranscriptionProviderConfig {
-  return normalizeProviderConfig(providerConfig);
+function resolveFoundryRealtimeBaseUrl(
+  config: FoundryRealtimeTranscriptionProviderConfig,
+): string | undefined {
+  if (config.endpoint) {
+    return normalizeFoundryEndpoint(config.endpoint);
+  }
+  if (!config.baseUrl) {
+    return undefined;
+  }
+  return normalizeFoundryEndpoint(config.baseUrl);
 }
 
-class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession {
+class FoundryRealtimeTranscriptionSession implements RealtimeTranscriptionSession {
   private static readonly MAX_RECONNECT_ATTEMPTS = 5;
   private static readonly RECONNECT_DELAY_MS = 1000;
   private static readonly CONNECT_TIMEOUT_MS = 10_000;
@@ -83,7 +101,7 @@ class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession
   private reconnectAttempts = 0;
   private pendingTranscript = "";
 
-  constructor(private readonly config: OpenAIRealtimeTranscriptionSessionConfig) {}
+  constructor(private readonly config: FoundryRealtimeTranscriptionSessionConfig) {}
 
   async connect(): Promise<void> {
     this.closed = false;
@@ -116,27 +134,27 @@ class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession
 
   private async doConnect(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      this.ws = new WebSocket("wss://api.openai.com/v1/realtime?intent=transcription", {
+      const wsUrl = this.buildWebSocketUrl();
+      this.ws = new WebSocket(wsUrl, {
         headers: {
-          Authorization: `Bearer ${this.config.apiKey}`,
-          "OpenAI-Beta": "realtime=v1",
+          "api-key": this.config.apiKey,
         },
       });
 
       const connectTimeout = setTimeout(() => {
-        reject(new Error("OpenAI realtime transcription connection timeout"));
-      }, OpenAIRealtimeTranscriptionSession.CONNECT_TIMEOUT_MS);
+        reject(new Error("Microsoft Foundry realtime transcription connection timeout"));
+      }, FoundryRealtimeTranscriptionSession.CONNECT_TIMEOUT_MS);
 
       this.ws.on("open", () => {
         clearTimeout(connectTimeout);
         this.connected = true;
         this.reconnectAttempts = 0;
         this.sendEvent({
-          type: "transcription_session.update",
+          type: "session.update",
           session: {
-            input_audio_format: this.config.inputAudioFormat,
+            input_audio_format: "pcm16",
             input_audio_transcription: {
-              model: this.config.model,
+              model: this.config.deployment,
             },
             turn_detection: {
               type: "server_vad",
@@ -176,17 +194,28 @@ class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession
     });
   }
 
+  private buildWebSocketUrl(): string {
+    const httpBaseUrl = this.config.baseUrl.replace(/\/+$/, "");
+    const wsBaseUrl = httpBaseUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
+    const url = new URL(`${wsBaseUrl}/openai/realtime`);
+    url.searchParams.set("api-version", this.config.apiVersion);
+    url.searchParams.set("deployment", this.config.deployment);
+    return url.toString();
+  }
+
   private async attemptReconnect(): Promise<void> {
     if (this.closed) {
       return;
     }
-    if (this.reconnectAttempts >= OpenAIRealtimeTranscriptionSession.MAX_RECONNECT_ATTEMPTS) {
-      this.config.onError?.(new Error("OpenAI realtime transcription reconnect limit reached"));
+    if (this.reconnectAttempts >= FoundryRealtimeTranscriptionSession.MAX_RECONNECT_ATTEMPTS) {
+      this.config.onError?.(
+        new Error("Microsoft Foundry realtime transcription reconnect limit reached"),
+      );
       return;
     }
     this.reconnectAttempts += 1;
     const delay =
-      OpenAIRealtimeTranscriptionSession.RECONNECT_DELAY_MS * 2 ** (this.reconnectAttempts - 1);
+      FoundryRealtimeTranscriptionSession.RECONNECT_DELAY_MS * 2 ** (this.reconnectAttempts - 1);
     await new Promise((resolve) => setTimeout(resolve, delay));
     if (this.closed) {
       return;
@@ -202,6 +231,7 @@ class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession
   private handleEvent(event: RealtimeEvent): void {
     switch (event.type) {
       case "conversation.item.input_audio_transcription.delta":
+      case "conversation.item.audio_transcription.delta":
         if (event.delta) {
           this.pendingTranscript += event.delta;
           this.config.onPartial?.(this.pendingTranscript);
@@ -209,11 +239,14 @@ class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession
         return;
 
       case "conversation.item.input_audio_transcription.completed":
-        if (event.transcript) {
-          this.config.onTranscript?.(event.transcript);
+      case "conversation.item.audio_transcription.completed": {
+        const transcript = event.transcript ?? event.item?.transcript;
+        if (transcript) {
+          this.config.onTranscript?.(transcript);
         }
         this.pendingTranscript = "";
         return;
+      }
 
       case "input_audio_buffer.speech_started":
         this.pendingTranscript = "";
@@ -243,28 +276,37 @@ class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession
   }
 }
 
-export function buildOpenAIRealtimeTranscriptionProvider(): RealtimeTranscriptionProviderPlugin {
+export function buildMicrosoftFoundryRealtimeTranscriptionProvider(): RealtimeTranscriptionProviderPlugin {
   return {
-    id: "openai",
-    label: "OpenAI Realtime Transcription",
-    aliases: ["openai-realtime"],
-    autoSelectOrder: 10,
-    resolveConfig: ({ rawConfig }) => normalizeProviderConfig(rawConfig),
-    isConfigured: ({ providerConfig }) =>
-      Boolean(readProviderConfig(providerConfig).apiKey || process.env.OPENAI_API_KEY),
+    id: PROVIDER_ID,
+    label: "Microsoft Foundry Realtime Transcription",
+    aliases: ["azure-foundry", "azure-openai-foundry"],
+    autoSelectOrder: 20,
+    resolveConfig: ({ rawConfig }) => extractFoundryProviderConfig(rawConfig),
+    isConfigured: ({ providerConfig }) => {
+      const config = extractFoundryProviderConfig(providerConfig);
+      return Boolean(config.apiKey && resolveFoundryRealtimeBaseUrl(config) && config.deployment);
+    },
     createSession: (req) => {
-      const config = readProviderConfig(req.providerConfig);
-      const apiKey = config.apiKey || process.env.OPENAI_API_KEY;
-      if (!apiKey) {
-        throw new Error("OpenAI API key missing");
+      const config = extractFoundryProviderConfig(req.providerConfig);
+      const baseUrl = resolveFoundryRealtimeBaseUrl(config);
+      if (!config.apiKey) {
+        throw new Error("Microsoft Foundry realtime transcription API key missing");
       }
-      return new OpenAIRealtimeTranscriptionSession({
+      if (!baseUrl) {
+        throw new Error("Microsoft Foundry realtime transcription endpoint missing");
+      }
+      if (!config.deployment) {
+        throw new Error("Microsoft Foundry realtime transcription deployment missing");
+      }
+      return new FoundryRealtimeTranscriptionSession({
         ...req,
-        apiKey,
-        model: config.model ?? "gpt-4o-transcribe",
+        apiKey: config.apiKey,
+        baseUrl,
+        deployment: config.deployment,
+        apiVersion: config.apiVersion ?? "2025-04-01-preview",
         silenceDurationMs: config.silenceDurationMs ?? 800,
         vadThreshold: config.vadThreshold ?? 0.5,
-        inputAudioFormat: config.inputAudioFormat ?? "g711_ulaw",
       });
     },
   };
