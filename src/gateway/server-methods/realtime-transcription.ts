@@ -32,11 +32,22 @@ function parseAudioBuffer(value: unknown): Buffer {
   if (!audio) {
     throw new Error("audio is required.");
   }
-  try {
-    return Buffer.from(audio, "base64");
-  } catch {
+  if (!isStrictBase64(audio)) {
     throw new Error("audio must be base64 encoded.");
   }
+  return Buffer.from(audio, "base64");
+}
+
+function isStrictBase64(value: string): boolean {
+  const normalized = value.replace(/\s+/g, "");
+  if (!normalized || normalized.length % 4 !== 0) {
+    return false;
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+    return false;
+  }
+  const decoded = Buffer.from(normalized, "base64");
+  return decoded.length > 0 && decoded.toString("base64") === normalized;
 }
 
 export const realtimeTranscriptionHandlers: GatewayRequestHandlers = {

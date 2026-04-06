@@ -89,6 +89,23 @@ describe("realtimeTranscriptionHandlers", () => {
     );
   });
 
+  it("rejects malformed base64 audio payloads before forwarding to the manager", async () => {
+    const respond = vi.fn();
+
+    await realtimeTranscriptionHandlers["realtimeTranscription.pushAudio"]({
+      req: { method: "realtimeTranscription.pushAudio", id: "2b" } as never,
+      params: { sessionId: "s1", audio: "%%%not-base64%%%" },
+      client: null,
+      isWebchatConnect: () => false,
+      respond,
+      context: {} as never,
+    });
+
+    expect(mocks.manager.pushAudio).not.toHaveBeenCalled();
+    expect(respond.mock.calls[0]?.[0]).toBe(false);
+    expect(JSON.stringify(respond.mock.calls[0]?.[2] ?? {})).toContain("audio must be base64 encoded");
+  });
+
   it("returns final events from finish and lets the manager clean up immediately", async () => {
     mocks.manager.finishSession.mockReturnValue({
       sessionId: "s1",
