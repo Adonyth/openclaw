@@ -143,6 +143,14 @@ vi.mock("../gateway/call.js", () => ({
   randomIdempotencyKey: () => "run-1",
 }));
 
+vi.mock("../gateway/connection-details.js", () => ({
+  buildGatewayConnectionDetailsWithResolvers: vi.fn(() => ({
+    url: "ws://127.0.0.1:18789",
+    urlSource: "local loopback",
+    message: "Gateway target: ws://127.0.0.1:18789",
+  })),
+}));
+
 vi.mock("../media-understanding/runtime.js", () => ({
   describeImageFile: (...args: unknown[]) => mocks.describeImageFile(...args),
   describeVideoFile: vi.fn(),
@@ -530,6 +538,37 @@ describe("capability cli", () => {
           voiceId: "alloy",
         }),
       }),
+    );
+  });
+
+  it("fails clearly when gateway TTS output is requested against a remote gateway", async () => {
+    const gatewayConnection = await import("../gateway/connection-details.js");
+    vi.mocked(gatewayConnection.buildGatewayConnectionDetailsWithResolvers).mockReturnValueOnce({
+      url: "wss://gateway.example.com",
+      urlSource: "config gateway.remote.url",
+      message: "Gateway target: wss://gateway.example.com",
+    });
+
+    await expect(
+      runRegisteredCli({
+        register: registerCapabilityCli as (program: Command) => void,
+        argv: [
+          "capability",
+          "media",
+          "tts",
+          "convert",
+          "--gateway",
+          "--text",
+          "hello",
+          "--output",
+          "hello.mp3",
+          "--json",
+        ],
+      }),
+    ).rejects.toThrow("exit 1");
+
+    expect(mocks.runtime.error).toHaveBeenCalledWith(
+      expect.stringContaining("--output is not supported for remote gateway TTS yet"),
     );
   });
 

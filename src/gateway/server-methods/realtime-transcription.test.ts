@@ -88,4 +88,36 @@ describe("realtimeTranscriptionHandlers", () => {
       expect.objectContaining({ sessionId: "s1", acceptedBytes: 4 }),
     );
   });
+
+  it("returns final events from finish and lets the manager clean up immediately", async () => {
+    mocks.manager.finishSession.mockReturnValue({
+      sessionId: "s1",
+      provider: "openai",
+      closed: true,
+      events: [{ type: "session.ended", reason: "client_finish", timestamp: 123 }],
+    });
+    const respond = vi.fn();
+
+    await realtimeTranscriptionHandlers["realtimeTranscription.finish"]({
+      req: { method: "realtimeTranscription.finish", id: "3" } as never,
+      params: { sessionId: "s1" },
+      client: null,
+      isWebchatConnect: () => false,
+      respond,
+      context: {} as never,
+    });
+
+    expect(mocks.manager.finishSession).toHaveBeenCalledWith({
+      sessionId: "s1",
+      reason: undefined,
+    });
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        sessionId: "s1",
+        closed: true,
+        events: [{ type: "session.ended", reason: "client_finish", timestamp: 123 }],
+      }),
+    );
+  });
 });

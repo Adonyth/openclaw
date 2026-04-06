@@ -15,6 +15,8 @@ import { loadModelCatalog } from "../agents/model-catalog.js";
 import { modelsAuthLoginCommand, modelsStatusCommand } from "../commands/models.js";
 import { loadConfig } from "../config/config.js";
 import { callGateway, randomIdempotencyKey } from "../gateway/call.js";
+import { buildGatewayConnectionDetailsWithResolvers } from "../gateway/connection-details.js";
+import { isLoopbackHost } from "../gateway/net.js";
 import { generateImage, listRuntimeImageGenerationProviders } from "../image-generation/runtime.js";
 import { buildMediaUnderstandingRegistry } from "../media-understanding/provider-registry.js";
 import {
@@ -846,6 +848,7 @@ async function runTtsConvert(params: {
   transport: CapabilityTransport;
 }) {
   if (params.transport === "gateway") {
+    const gatewayConnection = buildGatewayConnectionDetailsWithResolvers({ config: loadConfig() });
     const result = await callGateway<{
       audioPath?: string;
       provider?: string;
@@ -864,6 +867,12 @@ async function runTtsConvert(params: {
     });
     let outputPath = result.audioPath;
     if (params.output && result.audioPath) {
+      const gatewayHost = new URL(gatewayConnection.url).hostname;
+      if (!isLoopbackHost(gatewayHost)) {
+        throw new Error(
+          `--output is not supported for remote gateway TTS yet (gateway target: ${gatewayConnection.url}).`,
+        );
+      }
       const target = path.resolve(params.output);
       await fs.mkdir(path.dirname(target), { recursive: true });
       await fs.copyFile(result.audioPath, target);

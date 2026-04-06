@@ -222,10 +222,13 @@ export class RealtimeTranscriptionSessionManager {
         timestamp: this.deps.now(),
       });
     }
+    const events = managed.events.splice(0, managed.events.length);
+    this.sessions.delete(params.sessionId);
     return {
       sessionId: managed.id,
       provider: managed.provider,
       closed: true,
+      events,
     };
   }
 

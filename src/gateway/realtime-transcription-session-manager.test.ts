@@ -85,6 +85,54 @@ describe("RealtimeTranscriptionSessionManager", () => {
     ).rejects.toThrow(/mono audio/);
   });
 
+  it("returns pending terminal events on finish and removes the session", async () => {
+    let callbacks: Record<string, unknown> | undefined;
+    const close = vi.fn();
+    const provider = createProvider({
+      onCreate: (req) => {
+        callbacks = req;
+      },
+    });
+    provider.createSession = (req) => {
+      callbacks = req as unknown as Record<string, unknown>;
+      return {
+        connect: async () => {},
+        sendAudio: vi.fn(),
+        close,
+        isConnected: () => false,
+      };
+    };
+    const manager = new RealtimeTranscriptionSessionManager({
+      loadConfig: () => ({}) as OpenClawConfig,
+      listProviders: () => [provider],
+      getProvider: () => provider,
+      now: () => 123,
+      createId: () => "session-1",
+    });
+
+    await manager.startSession({
+      format: "s16le",
+      sampleRate: 16000,
+      channels: 1,
+    });
+    (callbacks?.onPartial as ((value: string) => void) | undefined)?.("hello");
+
+    expect(manager.finishSession({ sessionId: "session-1" })).toEqual({
+      sessionId: "session-1",
+      provider: "openai",
+      closed: true,
+      events: [
+        { type: "session.started", provider: "openai", transport: "gateway", timestamp: 123 },
+        { type: "partial", text: "hello", timestamp: 123 },
+        { type: "session.ended", reason: "client_finish", timestamp: 123 },
+      ],
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(() => manager.pullEvents({ sessionId: "session-1" })).toThrow(
+      /Unknown realtime transcription session/,
+    );
+  });
+
   it("fails when no configured provider is available", async () => {
     const provider = createProvider({ configured: false });
     const manager = new RealtimeTranscriptionSessionManager({

@@ -10,7 +10,7 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
-- CLI/capabilities: add a first-class `openclaw capability ...` surface so OpenClaw can act as one hub for provider-backed inference tasks across model runs, image generation and description, audio transcription, TTS, video generation and description, web search/fetch, and embedding creation, with consistent JSON output, provider discovery, and local-vs-gateway routing.
+- CLI/capabilities: add a first-class `openclaw capability ...` surface so OpenClaw can act as one hub for provider-backed inference tasks across model runs, image generation and description, audio transcription, TTS, video generation and description, web search/fetch, and embedding creation, with consistent JSON output, provider discovery, and local-vs-gateway routing. Thanks @Takhoffman.
 - Agents/cache: diagnostics: add prompt-cache break diagnostics, trace live cache scenarios through embedded runner paths, and show cache reuse explicitly in `openclaw status --verbose`. Thanks @vincentkoc.
 - Agents/cache: stabilize cache-relevant system prompt fingerprints by normalizing equivalent structured prompt whitespace, line endings, hook-added system context, and runtime capability ordering so semantically unchanged prompts reuse KV/cache more reliably. Thanks @vincentkoc.
 - Agents/Claude CLI: expose OpenClaw tools to background Claude CLI runs through a loopback MCP bridge that reuses gateway tool policy, honors session/account/channel scoping, and only advertises the bridge when the local runtime is actually live. (#35676) Thanks @mylukin.
