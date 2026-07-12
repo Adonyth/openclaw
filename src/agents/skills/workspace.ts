@@ -83,6 +83,35 @@ const DEFAULT_MAX_SKILLS_LOADED_PER_SOURCE = 200;
 const DEFAULT_MAX_SKILLS_IN_PROMPT = 150;
 const DEFAULT_MAX_SKILLS_PROMPT_CHARS = 30_000;
 const DEFAULT_MAX_SKILL_FILE_BYTES = 256_000;
+// Only an explicitly configured extraDir is trusted for priority preservation.
+// Plugin-contributed and higher-precedence project/workspace skills keep normal
+// override semantics but cannot inherit a reserved prompt slot by name.
+const DEFAULT_PROMPT_PRIORITY_SKILL_SOURCE = "openclaw-extra";
+
+// Cross-cutting workflow and scientific-method owners whose task-shape
+// descriptions must survive the default catalog limits. Keeping this list at
+// the prompt boundary prevents alphabetical/source order from silently making
+// foundational routes undiscoverable while preserving the global budgets.
+// Normal source precedence still decides the resolved winner; priority never
+// resurrects a lower-precedence entry after an intentional shadow.
+const DEFAULT_PROMPT_PRIORITY_SKILL_NAMES = new Set([
+  "adversarial-referee",
+  "deep-reasoning",
+  "empirical-research",
+  "hardware-product",
+  "quality-review",
+  "research-data-readiness",
+  "research-direction",
+  "research-method",
+  "research-professor",
+  "scientific-experiment-record",
+  "scientific-figure-production",
+  "scientific-manuscript-writing",
+  "senior-coding-loop",
+  "significance-gate",
+  "significance-lift",
+  "submission-execution",
+]);
 
 type ResolvedSkillsLimits = {
   maxCandidatesPerRoot: number;
@@ -417,21 +446,27 @@ function loadSkillEntries(
     workspaceDir,
     config: opts?.config,
   });
-  const mergedExtraDirs = [...extraDirs, ...pluginSkillDirs];
-
   const bundledSkills = bundledSkillsDir
     ? loadSkills({
         dir: bundledSkillsDir,
         source: "openclaw-bundled",
       })
     : [];
-  const extraSkills = mergedExtraDirs.flatMap((dir) => {
+  const configuredExtraSkills = extraDirs.flatMap((dir) => {
     const resolved = resolveUserPath(dir);
     return loadSkills({
       dir: resolved,
       source: "openclaw-extra",
     });
   });
+  const pluginSkills = pluginSkillDirs.flatMap((dir) => {
+    const resolved = resolveUserPath(dir);
+    return loadSkills({
+      dir: resolved,
+      source: "openclaw-plugin",
+    });
+  });
+  const extraSkills = [...configuredExtraSkills, ...pluginSkills];
   const managedSkills = loadSkills({
     dir: managedSkillsDir,
     source: "openclaw-managed",
@@ -531,55 +566,221 @@ export function formatSkillsCompact(skills: Skill[]): string {
   return lines.join("\n");
 }
 
-// Budget reserved for the compact-mode warning line prepended by the caller.
-const COMPACT_WARNING_OVERHEAD = 150;
+function isPromptPrioritySkill(skill: Skill): boolean {
+  return (
+    skill.source === DEFAULT_PROMPT_PRIORITY_SKILL_SOURCE &&
+    DEFAULT_PROMPT_PRIORITY_SKILL_NAMES.has(skill.name)
+  );
+}
 
-function applySkillsPromptLimits(params: { skills: Skill[]; config?: OpenClawConfig }): {
+/**
+ * Preserve the input order while reserving count-budget slots for priority
+ * skills. Explicit limits still win: if the limit is smaller than the number
+ * of priority skills, the first priority skills in catalog order are kept.
+ */
+function selectSkillsWithinCount(skills: Skill[], maxCount: number): Skill[] {
+  const limit = Math.max(0, maxCount);
+  if (skills.length <= limit) return skills;
+
+  const priorityIndexes: number[] = [];
+  const ordinaryIndexes: number[] = [];
+  for (let index = 0; index < skills.length; index += 1) {
+    (isPromptPrioritySkill(skills[index]) ? priorityIndexes : ordinaryIndexes).push(index);
+  }
+
+  const selected = new Set(priorityIndexes.slice(0, limit));
+  const ordinarySlots = limit - selected.size;
+  for (const index of ordinaryIndexes.slice(0, ordinarySlots)) {
+    selected.add(index);
+  }
+  return skills.filter((_, index) => selected.has(index));
+}
+
+/**
+ * Budget fallback that retains task-shape descriptions for priority owners and
+ * renders all other entries as name + location. This avoids globally raising
+ * prompt limits while keeping foundational routes semantically discoverable.
+ */
+function formatSkillsWithPriorityDescriptions(
+  skills: Skill[],
+  descriptionSkills: ReadonlySet<Skill>,
+): string {
+  if (skills.length === 0) return "";
+  const lines = [
+    "\n\nThe following skills provide specialized instructions for specific tasks.",
+    "Use the read tool to load a skill's file when the task matches its description or name.",
+    "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+    "",
+    "<available_skills>",
+  ];
+  for (const skill of skills) {
+    lines.push("  <skill>");
+    lines.push(`    <name>${escapeXml(skill.name)}</name>`);
+    if (descriptionSkills.has(skill)) {
+      lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+    }
+    lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
+    lines.push("  </skill>");
+  }
+  lines.push("</available_skills>");
+  return lines.join("\n");
+}
+
+type SkillsPromptSelection = {
   skillsForPrompt: Skill[];
   truncated: boolean;
   compact: boolean;
-} {
+  priorityDescriptionSkills: ReadonlySet<Skill>;
+};
+
+function renderSkillsPromptSelection(params: {
+  selection: SkillsPromptSelection;
+  totalSkills: number;
+  remoteNote?: string;
+}): string {
+  const { skillsForPrompt, truncated, compact, priorityDescriptionSkills } = params.selection;
+  const descriptionsInPrompt = new Set(
+    skillsForPrompt.filter((skill) => priorityDescriptionSkills.has(skill)),
+  );
+  const prioritySkillsInPrompt = skillsForPrompt.filter(isPromptPrioritySkill).length;
+  const priorityDescriptionsInPrompt = descriptionsInPrompt.size;
+  const priorityFormatNote =
+    priorityDescriptionsInPrompt === 0
+      ? ""
+      : priorityDescriptionsInPrompt === prioritySkillsInPrompt
+        ? "priority descriptions preserved; other descriptions omitted"
+        : `${priorityDescriptionsInPrompt} of ${prioritySkillsInPrompt} priority descriptions preserved; other descriptions omitted`;
+  const truncationNote = truncated
+    ? `⚠️ Skills truncated: included ${skillsForPrompt.length} of ${params.totalSkills}${priorityFormatNote ? ` (${priorityFormatNote})` : compact ? " (compact format, descriptions omitted)" : ""}. Run \`openclaw skills check\` to audit.`
+    : compact
+      ? `⚠️ Skills catalog using compact format (descriptions omitted). Run \`openclaw skills check\` to audit.`
+      : priorityFormatNote
+        ? `⚠️ Skills catalog using priority-description format (${priorityFormatNote}). Run \`openclaw skills check\` to audit.`
+        : "";
+  return [
+    params.remoteNote,
+    truncationNote,
+    priorityDescriptionsInPrompt > 0
+      ? formatSkillsWithPriorityDescriptions(skillsForPrompt, descriptionsInPrompt)
+      : compact
+        ? formatSkillsCompact(skillsForPrompt)
+        : formatSkillsForPrompt(skillsForPrompt),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function renderSkillsBudgetExhausted(totalSkills: number, maxChars: number): string {
+  const budget = Math.max(0, maxChars);
+  return `0/${totalSkills} skills`.slice(0, budget);
+}
+
+function applySkillsPromptLimits(params: {
+  skills: Skill[];
+  config?: OpenClawConfig;
+  remoteNote?: string;
+}): SkillsPromptSelection {
   const limits = resolveSkillsLimits(params.config);
   const total = params.skills.length;
-  const byCount = params.skills.slice(0, Math.max(0, limits.maxSkillsInPrompt));
+  const byCount = selectSkillsWithinCount(params.skills, limits.maxSkillsInPrompt);
 
   let skillsForPrompt = byCount;
   let truncated = total > byCount.length;
   let compact = false;
+  let priorityDescriptionSkills: ReadonlySet<Skill> = new Set();
 
+  const renderedLength = (
+    skills: Skill[],
+    compactMode: boolean,
+    descriptionSkills: ReadonlySet<Skill>,
+  ): number =>
+    renderSkillsPromptSelection({
+      selection: {
+        skillsForPrompt: skills,
+        truncated: total > skills.length,
+        compact: compactMode,
+        priorityDescriptionSkills: descriptionSkills,
+      },
+      totalSkills: total,
+      remoteNote: params.remoteNote,
+    }).length;
   const fitsFull = (skills: Skill[]): boolean =>
-    formatSkillsForPrompt(skills).length <= limits.maxSkillsPromptChars;
-
-  // Reserve space for the warning line the caller prepends in compact mode.
-  const compactBudget = limits.maxSkillsPromptChars - COMPACT_WARNING_OVERHEAD;
+    renderedLength(skills, false, new Set()) <= limits.maxSkillsPromptChars;
   const fitsCompact = (skills: Skill[]): boolean =>
-    formatSkillsCompact(skills).length <= compactBudget;
+    renderedLength(skills, true, new Set()) <= limits.maxSkillsPromptChars;
+  const fitsPriorityDescriptions = (
+    skills: Skill[],
+    descriptionSkills: ReadonlySet<Skill>,
+  ): boolean => renderedLength(skills, false, descriptionSkills) <= limits.maxSkillsPromptChars;
+
+  const largestFittingSubset = (
+    skills: Skill[],
+    fits: (candidate: Skill[]) => boolean,
+  ): Skill[] => {
+    let lo = 0;
+    let hi = skills.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const candidate = selectSkillsWithinCount(skills, mid);
+      if (fits(candidate)) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return selectSkillsWithinCount(skills, lo);
+  };
 
   if (!fitsFull(skillsForPrompt)) {
-    // Full format exceeds budget. Try compact (name + location, no description)
-    // to preserve awareness of all skills before dropping any.
-    if (fitsCompact(skillsForPrompt)) {
+    const prioritySkills = skillsForPrompt.filter(isPromptPrioritySkill);
+    if (prioritySkills.length === 0) {
+      // Catalogs without trusted priority skills retain the existing compact
+      // behavior and prefix-compatible ordering.
       compact = true;
-      // No skills dropped — only format downgraded. Preserve existing truncated state.
+      if (!fitsCompact(skillsForPrompt)) {
+        skillsForPrompt = largestFittingSubset(skillsForPrompt, fitsCompact);
+        truncated = true;
+      }
     } else {
-      // Compact still too large — binary search the largest prefix that fits.
-      compact = true;
-      let lo = 0;
-      let hi = skillsForPrompt.length;
-      while (lo < hi) {
-        const mid = Math.ceil((lo + hi) / 2);
-        if (fitsCompact(skillsForPrompt.slice(0, mid))) {
-          lo = mid;
-        } else {
-          hi = mid - 1;
+      const allPriorityDescriptions = new Set(prioritySkills);
+      const priorityOnly = selectSkillsWithinCount(skillsForPrompt, prioritySkills.length);
+
+      if (fitsPriorityDescriptions(priorityOnly, allPriorityDescriptions)) {
+        // Keep every trusted priority description, then spend remaining budget
+        // on as many ordinary catalog entries as fit.
+        priorityDescriptionSkills = allPriorityDescriptions;
+        if (!fitsPriorityDescriptions(skillsForPrompt, allPriorityDescriptions)) {
+          skillsForPrompt = largestFittingSubset(skillsForPrompt, (candidate) =>
+            fitsPriorityDescriptions(candidate, allPriorityDescriptions),
+          );
+          truncated = true;
+        }
+      } else {
+        // One pathological description must not collapse the entire catalog.
+        // First preserve the largest compact, priority-aware catalog; then add
+        // each priority description independently when it fits, skipping only
+        // the descriptions that exceed the remaining budget.
+        compact = true;
+        if (!fitsCompact(skillsForPrompt)) {
+          skillsForPrompt = largestFittingSubset(skillsForPrompt, fitsCompact);
+          truncated = true;
+        }
+        const fittingDescriptions = new Set<Skill>();
+        for (const skill of skillsForPrompt.filter(isPromptPrioritySkill)) {
+          const candidateDescriptions = new Set(fittingDescriptions).add(skill);
+          if (fitsPriorityDescriptions(skillsForPrompt, candidateDescriptions)) {
+            fittingDescriptions.add(skill);
+          }
+        }
+        if (fittingDescriptions.size > 0) {
+          priorityDescriptionSkills = fittingDescriptions;
+          compact = false;
         }
       }
-      skillsForPrompt = skillsForPrompt.slice(0, lo);
-      truncated = true;
     }
   }
 
-  return { skillsForPrompt, truncated, compact };
+  return { skillsForPrompt, truncated, compact, priorityDescriptionSkills };
 }
 
 export function buildWorkspaceSkillSnapshot(
@@ -655,22 +856,25 @@ function resolveWorkspaceSkillPromptState(
   // tier decision is based on the exact strings that end up in the prompt.
   // resolvedSkills keeps canonical paths for snapshot / runtime consumers.
   const promptSkills = compactSkillPaths(resolvedSkills);
-  const { skillsForPrompt, truncated, compact } = applySkillsPromptLimits({
-    skills: promptSkills,
-    config: opts?.config,
-  });
-  const truncationNote = truncated
-    ? `⚠️ Skills truncated: included ${skillsForPrompt.length} of ${resolvedSkills.length}${compact ? " (compact format, descriptions omitted)" : ""}. Run \`openclaw skills check\` to audit.`
-    : compact
-      ? `⚠️ Skills catalog using compact format (descriptions omitted). Run \`openclaw skills check\` to audit.`
-      : "";
-  const prompt = [
+  const { skillsForPrompt, truncated, compact, priorityDescriptionSkills } =
+    applySkillsPromptLimits({
+      skills: promptSkills,
+      config: opts?.config,
+      remoteNote,
+    });
+  const maxChars = resolveSkillsLimits(opts?.config).maxSkillsPromptChars;
+  const renderedPrompt = renderSkillsPromptSelection({
+    selection: { skillsForPrompt, truncated, compact, priorityDescriptionSkills },
+    totalSkills: resolvedSkills.length,
     remoteNote,
-    truncationNote,
-    compact ? formatSkillsCompact(skillsForPrompt) : formatSkillsForPrompt(skillsForPrompt),
-  ]
-    .filter(Boolean)
-    .join("\n");
+  });
+  // An extremely small limit (or a remote note larger than the whole budget)
+  // cannot fit even an empty catalog plus its audit warning. Keep the hard
+  // contract with a minimal bounded status instead of slicing XML.
+  const prompt =
+    renderedPrompt.length <= maxChars
+      ? renderedPrompt
+      : renderSkillsBudgetExhausted(resolvedSkills.length, maxChars);
   return { eligible, prompt, resolvedSkills };
 }
 

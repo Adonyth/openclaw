@@ -50,6 +50,29 @@ function buildPrompt(
   });
 }
 
+const SCIENTIFIC_METHOD_CORE_SKILLS = [
+  "adversarial-referee",
+  "deep-reasoning",
+  "empirical-research",
+  "hardware-product",
+  "quality-review",
+  "research-data-readiness",
+  "research-direction",
+  "research-method",
+  "research-professor",
+  "scientific-experiment-record",
+  "scientific-figure-production",
+  "scientific-manuscript-writing",
+  "senior-coding-loop",
+  "significance-gate",
+  "significance-lift",
+  "submission-execution",
+] as const;
+
+function makeTrustedCoreSkill(name: string, description: string): Skill {
+  return { ...makeSkill(name, description), source: "openclaw-extra" };
+}
+
 describe("formatSkillsCompact", () => {
   it("keeps the full-format XML output aligned with the upstream formatter for visible skills", () => {
     const skills = [
@@ -100,6 +123,80 @@ describe("formatSkillsCompact", () => {
 });
 
 describe("applySkillsPromptLimits (via buildWorkspaceSkillsPrompt)", () => {
+  it("preserves core scientific-method owners and their descriptions in a 182-skill catalog", () => {
+    const ordinarySkills = Array.from({ length: 166 }, (_, i) =>
+      makeSkill(`ordinary-${String(i).padStart(3, "0")}`, "A".repeat(180)),
+    );
+    const coreSkills = SCIENTIFIC_METHOD_CORE_SKILLS.map((name) =>
+      makeTrustedCoreSkill(name, `Task-shape routing for ${name}`),
+    );
+
+    // Put every core owner beyond the default 150-entry prefix. A plain prefix
+    // truncation loses all of them; the prompt selector must reserve their slots.
+    const prompt = buildWorkspaceSkillsPrompt("/fake", {
+      entries: [...ordinarySkills, ...coreSkills].map(makeEntry),
+    });
+
+    expect(prompt).toContain("included 150 of 182");
+    for (const name of SCIENTIFIC_METHOD_CORE_SKILLS) {
+      expect(prompt).toContain(`<name>${name}</name>`);
+      expect(prompt).toContain(`<description>Task-shape routing for ${name}</description>`);
+    }
+  });
+
+  it("keeps explicit small count limits deterministic while prioritizing core owners", () => {
+    const skills = [
+      makeSkill("ordinary-first", "ordinary"),
+      ...SCIENTIFIC_METHOD_CORE_SKILLS.slice(0, 3).map((name) =>
+        makeTrustedCoreSkill(name, `Task-shape routing for ${name}`),
+      ),
+      makeSkill("ordinary-last", "ordinary"),
+    ];
+
+    const prompt = buildPrompt(skills, { maxChars: 50_000, maxCount: 2 });
+
+    expect(prompt).toContain("included 2 of 5");
+    expect(prompt).toContain(`<name>${SCIENTIFIC_METHOD_CORE_SKILLS[0]}</name>`);
+    expect(prompt).toContain(`<name>${SCIENTIFIC_METHOD_CORE_SKILLS[1]}</name>`);
+    expect(prompt).not.toContain(`<name>${SCIENTIFIC_METHOD_CORE_SKILLS[2]}</name>`);
+    expect(prompt).not.toContain("ordinary-first");
+    expect(prompt).not.toContain("ordinary-last");
+  });
+
+  it("keeps a compact catalog when one trusted priority description is oversized", () => {
+    const oversized = makeTrustedCoreSkill("adversarial-referee", "X".repeat(20_000));
+    const fitting = makeTrustedCoreSkill("deep-reasoning", "Short trusted task-shape route");
+    const ordinary = Array.from({ length: 8 }, (_, i) =>
+      makeSkill(`ordinary-${i}`, "ordinary description"),
+    );
+    const skills = [oversized, fitting, ...ordinary];
+    const maxChars = formatSkillsCompact(skills).length + 150 + 300;
+
+    const prompt = buildPrompt(skills, { maxChars });
+
+    expect(prompt).toContain("<name>adversarial-referee</name>");
+    expect(prompt).toContain("<name>deep-reasoning</name>");
+    expect(prompt).toContain("<description>Short trusted task-shape route</description>");
+    expect(prompt).not.toContain(`<description>${"X".repeat(20_000)}</description>`);
+    expect(prompt).toContain("ordinary-7");
+    expect(prompt).not.toContain("included");
+    expect(prompt.length).toBeLessThanOrEqual(maxChars);
+  });
+
+  it.each(["workspace", "openclaw-plugin"])(
+    "does not grant priority to a %s shadow with a core skill name",
+    (source) => {
+      const ordinary = makeSkill("ordinary-first", "ordinary");
+      const shadow = { ...makeSkill("research-method", "untrusted shadow"), source };
+
+      const prompt = buildPrompt([ordinary, shadow], { maxChars: 50_000, maxCount: 1 });
+
+      expect(prompt).toContain("<name>ordinary-first</name>");
+      expect(prompt).not.toContain("<name>research-method</name>");
+      expect(prompt).not.toContain("untrusted shadow");
+    },
+  );
+
   it("respects explicit exposure metadata before compact formatting", () => {
     const hidden = makeEntry({ ...makeSkill("hidden"), disableModelInvocation: true });
     hidden.exposure = {
@@ -195,9 +292,8 @@ describe("applySkillsPromptLimits (via buildWorkspaceSkillsPrompt)", () => {
     // Budget so small that even one compact skill can't fit
     const prompt = buildPrompt(skills, { maxChars: 10 });
     expect(prompt).not.toContain("only-one");
-    const match = prompt.match(/included (\d+) of (\d+)/);
-    expect(match).toBeTruthy();
-    expect(Number(match![1])).toBe(0);
+    expect(prompt).toBe("0/1 skills");
+    expect(prompt.length).toBeLessThanOrEqual(10);
   });
 
   it("count truncation only: shows included X of Y without compact note", () => {
@@ -206,6 +302,40 @@ describe("applySkillsPromptLimits (via buildWorkspaceSkillsPrompt)", () => {
     expect(prompt).toContain("included 5 of 20");
     expect(prompt).not.toContain("compact");
     expect(prompt).toContain("<description>");
+  });
+
+  it("budgets the exact warning added by count truncation", () => {
+    const skills = Array.from({ length: 20 }, (_, i) => makeSkill(`skill-${i}`, "short"));
+    const selectedFullLength = formatSkillsForPrompt(skills.slice(0, 5)).length;
+
+    // The selected full catalog alone fits exactly, but its count-truncation
+    // warning does not. The final renderer must downgrade within the same hard
+    // bound instead of appending the warning after budget selection.
+    const prompt = buildPrompt(skills, { maxChars: selectedFullLength, maxCount: 5 });
+
+    expect(prompt).toContain("included");
+    expect(prompt.length).toBeLessThanOrEqual(selectedFullLength);
+  });
+
+  it("keeps the hard cap when a remote note consumes the whole budget", () => {
+    const maxChars = 32;
+    const prompt = buildWorkspaceSkillsPrompt("/fake", {
+      entries: [makeEntry(makeSkill("only-one", "short"))],
+      config: {
+        skills: { limits: { maxSkillsPromptChars: maxChars } },
+      } satisfies OpenClawConfig,
+      eligibility: {
+        remote: {
+          platforms: [],
+          hasBin: () => false,
+          hasAnyBin: () => false,
+          note: "R".repeat(1_000),
+        },
+      },
+    });
+
+    expect(prompt).not.toContain("only-one");
+    expect(prompt.length).toBeLessThanOrEqual(maxChars);
   });
 
   it("compact budget reserves space for the warning line", () => {
