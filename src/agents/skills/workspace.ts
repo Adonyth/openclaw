@@ -95,6 +95,7 @@ const DEFAULT_PROMPT_PRIORITY_SKILL_SOURCE = "openclaw-extra";
 // Normal source precedence still decides the resolved winner; priority never
 // resurrects a lower-precedence entry after an intentional shadow.
 const DEFAULT_PROMPT_PRIORITY_SKILL_NAMES = new Set([
+  "academic-literature-search",
   "adversarial-referee",
   "deep-reasoning",
   "empirical-research",
@@ -103,13 +104,21 @@ const DEFAULT_PROMPT_PRIORITY_SKILL_NAMES = new Set([
   "research-data-readiness",
   "research-direction",
   "research-method",
+  "research-presentation",
   "research-professor",
+  "research-synthesis",
+  "reviewer-response-drafting",
+  "scientific-citation-management",
   "scientific-experiment-record",
   "scientific-figure-production",
+  "scientific-manuscript-polishing",
+  "scientific-manuscript-review",
   "scientific-manuscript-writing",
+  "scientific-paper-reader",
   "senior-coding-loop",
   "significance-gate",
   "significance-lift",
+  "simulation-ground-truth",
   "submission-execution",
 ]);
 

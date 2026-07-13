@@ -51,6 +51,7 @@ function buildPrompt(
 }
 
 const SCIENTIFIC_METHOD_CORE_SKILLS = [
+  "academic-literature-search",
   "adversarial-referee",
   "deep-reasoning",
   "empirical-research",
@@ -59,13 +60,21 @@ const SCIENTIFIC_METHOD_CORE_SKILLS = [
   "research-data-readiness",
   "research-direction",
   "research-method",
+  "research-presentation",
   "research-professor",
+  "research-synthesis",
+  "reviewer-response-drafting",
+  "scientific-citation-management",
   "scientific-experiment-record",
   "scientific-figure-production",
+  "scientific-manuscript-polishing",
+  "scientific-manuscript-review",
   "scientific-manuscript-writing",
+  "scientific-paper-reader",
   "senior-coding-loop",
   "significance-gate",
   "significance-lift",
+  "simulation-ground-truth",
   "submission-execution",
 ] as const;
 
@@ -124,8 +133,9 @@ describe("formatSkillsCompact", () => {
 
 describe("applySkillsPromptLimits (via buildWorkspaceSkillsPrompt)", () => {
   it("preserves core scientific-method owners and their descriptions in a 182-skill catalog", () => {
-    const ordinarySkills = Array.from({ length: 166 }, (_, i) =>
-      makeSkill(`ordinary-${String(i).padStart(3, "0")}`, "A".repeat(180)),
+    const ordinarySkills = Array.from(
+      { length: 182 - SCIENTIFIC_METHOD_CORE_SKILLS.length },
+      (_, i) => makeSkill(`ordinary-${String(i).padStart(3, "0")}`, "A".repeat(180)),
     );
     const coreSkills = SCIENTIFIC_METHOD_CORE_SKILLS.map((name) =>
       makeTrustedCoreSkill(name, `Task-shape routing for ${name}`),
